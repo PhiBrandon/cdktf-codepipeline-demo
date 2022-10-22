@@ -47,7 +47,12 @@ class MyStack extends TerraformStack {
             Statement: [
               {
                 Effect: "Allow",
-                Action: ["codestar-connections:*", "codestar:*", "s3:*", "codebuild:*"],
+                Action: [
+                  "codestar-connections:*",
+                  "codestar:*",
+                  "s3:*",
+                  "codebuild:*",
+                ],
                 Resource: "*",
               },
             ],
@@ -87,7 +92,12 @@ class MyStack extends TerraformStack {
             Statement: [
               {
                 Effect: "Allow",
-                Action: ["codestar-connections:*", "codestar:*", "s3:*", "logs:*"],
+                Action: [
+                  "codestar-connections:*",
+                  "codestar:*",
+                  "s3:*",
+                  "logs:*",
+                ],
                 Resource: "*",
               },
             ],
@@ -95,9 +105,9 @@ class MyStack extends TerraformStack {
         },
       ],
     });
-    
+
     // Create Codebuild Project
-    // Artifacts and Source need to both be specified to CODEPIPELINE to utilize in codepipeline 
+    // Artifacts and Source need to both be specified to CODEPIPELINE to utilize in codepipeline
     // Must have a buildspec in the Source Artifacts root directory for it to succeed
     const codeBuildProjectPipeline = new codebuildProject.CodebuildProject(
       this,
@@ -158,7 +168,7 @@ class MyStack extends TerraformStack {
               outputArtifacts: ["build_output"],
               configuration: {
                 ProjectName: codeBuildProjectPipeline.name,
-                PrimarySource: "source_output`"
+                PrimarySource: "source_output`",
               },
             },
           ],
