@@ -1,5 +1,11 @@
 import { Construct } from "constructs";
-import { App, TerraformOutput, TerraformStack } from "cdktf";
+import {
+  App,
+  AssetType,
+  TerraformAsset,
+  TerraformOutput,
+  TerraformStack,
+} from "cdktf";
 import { AwsProvider } from "@cdktf/provider-aws/lib/provider";
 import {
   codepipeline,
@@ -7,7 +13,14 @@ import {
   s3Bucket,
   codestarconnectionsConnection,
   codebuildProject,
+  lambdaFunction,
+  cloudwatchEventRule,
+  cloudwatchEventTarget,
+  cloudwatchLogGroup,
+  lambdaPermission,
 } from "@cdktf/provider-aws";
+import { S3Bucket } from "@cdktf/provider-aws/lib/s3-bucket";
+import { S3Object } from "@cdktf/provider-aws/lib/s3-object";
 
 class MyStack extends TerraformStack {
   constructor(scope: Construct, name: string) {
@@ -16,12 +29,98 @@ class MyStack extends TerraformStack {
     // Create AWS Provider configuration for this stack
     new AwsProvider(this, "AWS", { region: "us-east-1" });
 
+    // Create compiled asset for Discord Lambda Function
+    const discordFnAsset = new TerraformAsset(this, "discord-fn-asset", {
+      path: "./discordFn",
+      type: AssetType.ARCHIVE,
+    });
+
+    // Create bucket to store Lambda code artifact
+    const discordFnAssetBucket = new S3Bucket(
+      this,
+      "discord-lambda-asset-bucket",
+      {
+        bucket: "discordnotibucket1234",
+      }
+    );
+
+    new TerraformOutput(this, "discordFnBucketOutput", {
+      value: discordFnAssetBucket.bucket,
+    });
+    // Create the artifact key and source AKA Architec
+    const discordFnArchive = new S3Object(this, "discord-fn-archive", {
+      bucket: discordFnAssetBucket.bucket,
+      key: discordFnAsset.fileName,
+      source: discordFnAsset.path,
+    });
+
     // Create S3 Bucket to store artifacts
     const pipelineBucket = new s3Bucket.S3Bucket(this, "pipeline-bucket", {
       bucket: "pipelinebucket" + Math.floor(Math.random() * 1000),
       forceDestroy: true,
     });
+    // Create role for Lambda Function
+    const discordFuncRole = new iamRole.IamRole(this, "discordFn-iam-role", {
+      assumeRolePolicy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Action: "sts:AssumeRole",
+            Effect: "Allow",
+            Sid: "",
+            Principal: {
+              Service: "lambda.amazonaws.com",
+            },
+          },
+        ],
+      }),
+      inlinePolicy: [
+        {
+          name: "lambdaMonitoring",
+          policy: JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [
+              {
+                Effect: "Allow",
+                Action: ["logs:*"],
+                Resource: "*",
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    const discordLogGroup = new cloudwatchLogGroup.CloudwatchLogGroup(
+      this,
+      "discordFnLogGroup",
+      {
+        name: "/aws/lambda/discordPipelineNotification",
+        retentionInDays: 1,
+      }
+    );
+    // Create Lambda Function to notify Discord
+    // Permissions: ParameterStore
+    const discordFunction = new lambdaFunction.LambdaFunction(
+      this,
+      "discordFunction",
+      {
+        role: discordFuncRole.arn,
+        functionName: "discordPipelineNotification",
+        runtime: "nodejs16.x",
+        handler: "index.handler",
+        s3Bucket: discordFnAssetBucket.bucket,
+        publish: true,
+        s3Key: discordFnArchive.key,
+        sourceCodeHash: discordFnArchive.key,
+        dependsOn: [discordLogGroup],
+      }
+    );
 
+    // Create discord Function Log group
+
+    new TerraformOutput(this, "discordFnOutput", {
+      value: discordFunction.arn,
+    });
     // Create Role for CodePipeline
     // Permissions required for pipeline using S3 for artifact store and Codestar connections for Github: codestar-connections:* , s3:*
     // -- Required if using CodeBuild: codebuild:*
@@ -52,6 +151,7 @@ class MyStack extends TerraformStack {
                   "codestar:*",
                   "s3:*",
                   "codebuild:*",
+                  "events:*",
                 ],
                 Resource: "*",
               },
@@ -175,6 +275,78 @@ class MyStack extends TerraformStack {
         },
       ],
     });
+    // Create IAM Role to invoke the lambda Function
+    const pipelineEventRole = new iamRole.IamRole(this, "pipelineEventRole", {
+      assumeRolePolicy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Action: "sts:AssumeRole",
+            Effect: "Allow",
+            Sid: "",
+            Principal: {
+              Service: "events.amazonaws.com",
+            },
+          },
+        ],
+      }),
+      inlinePolicy: [
+        {
+          name: "notify-discord-pipeline",
+          policy: JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [
+              {
+                Effect: "Allow",
+                Action: ["lambda:*", "codepipeline:*"],
+                Resource: "*",
+              },
+            ],
+          }),
+        },
+      ],
+    });
+    // Configure EventBridge Rules for notification system
+    // In order for a lambda to be triggered, you must use the LambdaPermission resource in terraform to link event bridge to Lambda
+    const discordRule = new cloudwatchEventRule.CloudwatchEventRule(
+      this,
+      "pipeline-Events",
+      {
+        eventPattern: JSON.stringify({
+          source: [
+            "aws.codebuild",
+            "aws.codecommit",
+            "aws.codedeploy",
+            "aws.codepipeline",
+          ],
+          "detail-type": ["CodePipeline Stage Execution State Change"],
+          detail: {
+            state: ["STARTED", "SUCCEEDED", "FAILED"],
+          },
+        }),
+        roleArn: pipelineEventRole.arn,
+        dependsOn: [discordFunction],
+      }
+    );
+    new cloudwatchEventTarget.CloudwatchEventTarget(
+      this,
+      "discordLambdaEventTarget",
+      {
+        rule: discordRule.name,
+        targetId: discordFunction.functionName,
+        arn: discordFunction.arn,
+      }
+    );
+    new lambdaPermission.LambdaPermission(
+      this,
+      "discord-function-invoke-permission",
+      {
+        functionName: discordFunction.functionName,
+        action: "lambda:InvokeFunction",
+        principal: "events.amazonaws.com",
+        sourceArn: discordRule.arn,
+      }
+    );
 
     new TerraformOutput(this, "pipeline-arn", { value: pipeline.arn });
   }
